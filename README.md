@@ -5,7 +5,7 @@ Source: https://github.com/sherlock-audit/2024-09-predict-fun-judging/issues/85
 The protocol has acknowledged this issue.
 
 ## Found by 
-000000, 0rpse, 0xnbvc, GGONE, PUSH0, Pheonix, SyncCode2017, bughuntoor, iamnmt, kennedy1030, t.aksoy
+000000, 0rpse, 0xnbvc, GGONE, PUSH0, Pheonix, Sickurity, SyncCode2017, bughuntoor, iamnmt, kennedy1030, t.aksoy, valuevalk
 ### Summary
 
 A borrower transfers `LOAN_TOKEN` directly to a lender when repaying their loan will cause the loan can not to be repaid when the lender is blacklisted by the `LOAN_TOKEN`.
@@ -148,7 +148,83 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/PredictDotFun/predict-dot-loan/pull/45
 
 
-# Issue M-3: Using wrong format of `questionId` for `NegRiskCtfAdapter` leads to loan operations on resolved multi-outcome markets 
+# Issue M-3: Refinancing and auction take less fee than expected. 
+
+Source: https://github.com/sherlock-audit/2024-09-predict-fun-judging/issues/118 
+
+## Found by 
+000000, 0xNirix, bughuntoor, dany.armstrong90, iamnmt, kennedy1030, silver\_eth, t.aksoy, tobi0x18
+### Summary
+
+When creating a new loan within `_acceptOffer`, the `protocolFee` is applied to the whole amount taken from the lender - the fulfilled amount.
+
+```solidity
+    function _transferLoanAmountAndProtocolFee(
+        address from,
+        address to,
+        uint256 loanAmount
+    ) private returns (uint256 protocolFee) {
+        protocolFee = (loanAmount * protocolFeeBasisPoints) / 10_000;
+        LOAN_TOKEN.safeTransferFrom(from, to, loanAmount - protocolFee);
+        if (protocolFee > 0) {
+            LOAN_TOKEN.safeTransferFrom(from, protocolFeeRecipient, protocolFee);
+        }
+    }
+``` 
+
+So if the user fulfills 1000 USDC and the protocol fee is 2%, the fee that will be taken will be 20 USDC and the user will receive 980 USDC.
+
+However, this is not the case within `refinance` and `auction`.
+
+```solidity
+        uint256 _nextLoanId = nextLoanId;
+        uint256 debt = _calculateDebt(loan.loanAmount, loan.interestRatePerSecond, callTime - loan.startTime);
+        uint256 protocolFee = (debt * protocolFeeBasisPoints) / 10_000;
+```
+
+There. the protocol fee is applied on the `debt`. So if a position with a debt of 980 USDC gets auctioned, the fee that will be paid will be 19,6 USDC.  In this case, the protocol will earn 2% less fees than expected.
+
+Whenever there's a protocol fee, `refinance` and `auction` will earn less fees proportional to the set `protocolFee`. Meaning that if the fee is 1%, these functions would earn 1% less. And if the fee is set to 2%, the loss will be 2%.
+
+As the protocol can easily lose up to 2% of its fees, this according to Sherlock rules should be classified as High severity
+> Definite loss of funds without (extensive) limitations of external conditions. The loss of the affected party must exceed 1%.
+
+
+### Root Cause
+
+Wrong math formula used
+
+### Affected Code
+https://github.com/sherlock-audit/2024-09-predict-fun/blob/main/predict-dot-loan/contracts/PredictDotLoan.sol#L585
+
+
+### Impact
+
+Protocol will make significantly less fees than expected.
+
+
+### PoC
+
+_No response_
+
+### Mitigation
+
+Use the following formula instead
+```solidity
+        uint256 protocolFee = (debt * protocolFeeBasisPoints) / (10_000 - protocolFeeBasisPoints);
+```
+
+
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/PredictDotFun/predict-dot-loan/pull/50
+
+
+# Issue M-4: Using wrong format of `questionId` for `NegRiskCtfAdapter` leads to loan operations on resolved multi-outcome markets 
 
 Source: https://github.com/sherlock-audit/2024-09-predict-fun-judging/issues/119 
 
@@ -260,450 +336,7 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/PredictDotFun/predict-dot-loan/pull/43
 
 
-# Issue M-4: The last lender of a partially fulfilled borrow request might have a significantly higher collateral ratio than the collateral ratio specified in the borrow request 
-
-Source: https://github.com/sherlock-audit/2024-09-predict-fun-judging/issues/125 
-
-## Found by 
-056Security, PUSH0, bughuntoor, cryptomoon, dany.armstrong90, debugging3, eeyore, iamnmt, kennedy1030, tobi0x18
-### Summary
-
-The last lender of a partially fulfilled borrow request might have a significantly higher collateral ratio than the collateral ratio specified in the borrow request.
-
-### Root Cause
-
-In `_acceptOffer`, the `collateralAmountRequired` is the leftover collateral when the borrow request is fully filled
-
-https://github.com/sherlock-audit/2024-09-predict-fun/blob/41e70f9eed3f00dd29aba4038544150f5b35dccb/predict-dot-loan/contracts/PredictDotLoan.sol#L983
-
-```solidity
-    function _calculateCollateralAmountRequired(
-        Proposal calldata proposal,
-        Fulfillment storage fulfillment,
-        uint256 fulfillAmount
-    ) private view returns (uint256 collateralAmountRequired) {
-        if (fulfillment.loanAmount + fulfillAmount == proposal.loanAmount) {
->>          collateralAmountRequired = proposal.collateralAmount - fulfillment.collateralAmount;
-        } else {
-            collateralAmountRequired = (proposal.collateralAmount * fulfillAmount) / proposal.loanAmount;
-        }
-    }
-```
-
-The borrower can use `matchProposals` to match their borrow request to a better loan offer, which has a lower collateral ratio than the ratio of the borrow request
-
-https://github.com/sherlock-audit/2024-09-predict-fun/blob/41e70f9eed3f00dd29aba4038544150f5b35dccb/predict-dot-loan/contracts/PredictDotLoan.sol#L351-L356
-
-```solidity
-        if (
-            borrowRequest.collateralAmount * loanOffer.loanAmount <
-            borrowRequest.loanAmount * loanOffer.collateralAmount
-        ) {
-            revert UnacceptableCollateralizationRatio();
-        }
-```
-
-then the collateral ratio of the loan is the collateral ratio of the loan offer
-
-https://github.com/sherlock-audit/2024-09-predict-fun/blob/41e70f9eed3f00dd29aba4038544150f5b35dccb/predict-dot-loan/contracts/PredictDotLoan.sol#L395-L399
-
-If the borrower has used their borrow request to match with the lower collateral ratio loan offer, then the last lender that fully accepts the borrow request will have a significantly higher collateral ratio than the collateral ratio specified in the borrow request.
-
-### Internal pre-conditions
-
-_No response_
-
-### External pre-conditions
-
-_No response_
-
-### Attack Path
-
-1. Alice signs a borrow request that has `collateralAmount = 20 ether`, and `loanAmount = 10 ether` (collateral ratio = 200%)
-2. Bob signs a loan offer that has `collateralAmount = 5 ether`, and `loanAmount = 5 ether` (collateral ratio = 100%)
-3. Since Bob's loan offer has a lower collateral ratio than her borrow request, the loan offer is better for her. Alice matches Bob's loan offer against her. Current states:
-   - `fulfillment.collateralAmount = 15 ether`
-   - `fulfillment.loanAmount = 5  ether`
-4. Cindy fully accepts Alice's borrow request, and Cindy benefits from a loan with high collateral ratio (15 ether / 5 ether = 300%)
-
-We believe the loan should only have a collateral ratio lower than or equal to 200%.
-
-### Impact
-
-- The last lender (Cindy) might have a significantly higher collateral ratio than the collateral ratio specified in the borrow request
-- The borrower (Alice) will have a loan that has a higher collateral ratio than expected. 
-
-
-### PoC
-
-Add a view function in `PredictDotLoan` to check the collateral ratio of a loan
-
-```solidity
-contract PredictDotLoan is AccessControl, EIP712, ERC1155Holder, IPredictDotLoan, Pausable, ReentrancyGuard {
-    ...
-    function getLoanCollateralRatio(uint256 loanId) public view returns (uint256) {
-        IPredictDotLoan.Loan memory loan = loans[loanId];
-        return loan.collateralAmount * 1 ether / loan.loanAmount;
-    }
-}
-```
-
-Run command: `forge test --match-path test/foundry/PoC.t.sol -vv`
-
-```solidity
-// SPDX-License-Identifier: MIT
-
-pragma solidity ^0.8.25;
-
-import {IPredictDotLoan} from "../../contracts/interfaces/IPredictDotLoan.sol";
-import {TestHelpers} from "./TestHelpers.sol";
-import {console} from "forge-std/Test.sol";
-
-contract PoC is TestHelpers {
-    uint256 aliceKey = 1;
-    uint256 bobKey = 2;
-
-    address alice = vm.addr(aliceKey);
-    address bob = vm.addr(bobKey);
-    address cindy = makeAddr('cindy');
-
-    function setUp() public {
-        _deploy();
-
-        vm.prank(alice);
-        mockCTF.setApprovalForAll(address(predictDotLoan), true);
-        _mintCTF(alice);
-
-        mockERC20.mint(bob, LOAN_AMOUNT);
-        vm.prank(bob);
-        mockERC20.approve(address(predictDotLoan), LOAN_AMOUNT);
-
-        mockERC20.mint(cindy, LOAN_AMOUNT);
-        vm.prank(cindy);
-        mockERC20.approve(address(predictDotLoan), LOAN_AMOUNT);
-    }
-
-    function test_PoC() public {
-        // Collateral ratio: 20 / 10 = 200%
-        IPredictDotLoan.Proposal memory borrowRequest = _generateBorrowRequest(
-            IPredictDotLoan.QuestionType.Binary,
-            alice,
-            aliceKey,
-            20 ether,
-            10 ether
-        );
-
-        // Collateral ratio: 5 / 5 = 100%
-        IPredictDotLoan.Proposal memory loanOffer = _generateLoanOffer(
-            IPredictDotLoan.QuestionType.Binary,
-            bob,
-            bobKey,
-            5 ether,
-            5 ether
-        );
-
-        predictDotLoan.matchProposals(borrowRequest, loanOffer);
-
-        vm.prank(cindy);
-        predictDotLoan.acceptBorrowRequest(borrowRequest, 5 ether);
-
-        console.log("First loan's collateral ratio: %e", predictDotLoan.getLoanCollateralRatio(1));
-        console.log("Second loan's collateral ratio: %e", predictDotLoan.getLoanCollateralRatio(2));
-    }
-
-    function _generateBorrowRequest(
-        IPredictDotLoan.QuestionType questionType,
-        address from,
-        uint256 privateKey,
-        uint256 collateralAmount,
-        uint256 loanAmount
-    ) internal view returns (IPredictDotLoan.Proposal memory proposal) {
-        proposal = _generateBaseProposal(questionType);
-        proposal.collateralAmount = collateralAmount;
-        proposal.loanAmount = loanAmount;
-        proposal.from = from;
-        proposal.proposalType = IPredictDotLoan.ProposalType.BorrowRequest;
-
-        (, uint128 borrowingNonce) = predictDotLoan.nonces(from);
-        proposal.nonce = borrowingNonce;
-
-        proposal.signature = _signProposal(proposal, privateKey);
-    }
-
-    function _generateLoanOffer(
-        IPredictDotLoan.QuestionType questionType,
-        address from,
-        uint256 privateKey,
-        uint256 collateralAmount,
-        uint256 loanAmount
-    ) internal view returns (IPredictDotLoan.Proposal memory proposal) {
-        proposal = _generateBaseProposal(questionType);
-        proposal.collateralAmount = collateralAmount;
-        proposal.loanAmount = loanAmount;
-        proposal.from = from;
-        proposal.proposalType = IPredictDotLoan.ProposalType.LoanOffer;
-
-        (uint128 lendingNonce, ) = predictDotLoan.nonces(from);
-        proposal.nonce = lendingNonce;
-
-        proposal.signature = _signProposal(proposal, privateKey);
-    }
-}
-```
-
-Logs:
-```bash
-  First loan's collateral ratio: 1e18
-  Second loan's collateral ratio: 3e18
-```
-
-### Mitigation
-
-In `_calculateCollateralAmountRequired`, the `collateralAmountRequired` is the leftover collateral only when the leftover amounts are only a few weis.
-```solidity
-    function _calculateCollateralAmountRequired(
-        Proposal calldata proposal,
-        Fulfillment storage fulfillment,
-        uint256 fulfillAmount
-    ) private view returns (uint256 collateralAmountRequired) {
-	collateralAmountRequired = (proposal.collateralAmount * fulfillAmount) / proposal.loanAmount;
-
-	if (fulfillment.loanAmount + fulfillAmount == proposal.loanAmount && proposal.collateralAmount - fulfillment.collateralAmount - collateralAmountRequired < THRESHOLD) {
-            collateralAmountRequired = proposal.collateralAmount - fulfillment.collateralAmount;
-        } 
-    }
-```
-
-`THRESHOLD` could be `10`.
-
-
-
-## Discussion
-
-**sherlock-admin2**
-
-The protocol team fixed this issue in the following PRs/commits:
-https://github.com/PredictDotFun/predict-dot-loan/pull/32
-
-
-# Issue M-5: An incorrect fee calculation may result in the application of two different fee rates 
-
-Source: https://github.com/sherlock-audit/2024-09-predict-fun-judging/issues/200 
-
-## Found by 
-000000, 0xNirix, bughuntoor, dany.armstrong90, iamnmt, kennedy1030, silver\_eth, t.aksoy, tobi0x18
-### Summary
-
-The protocol imposes a fee on each loan, calculated as a percentage of the loan amount. However, the usage of protocolFeeBasisPoints varies across different sections of the code.
-
-### Root Cause
-
-The `_acceptOrder()` and `matchProposals` functions use the following `_transferLoanAmountAndProtocolFee` function. 
-The amount of fee are calculated as the percentage of the whole `loanAmount`.
-https://github.com/sherlock-audit/2024-09-predict-fun/blob/main/predict-dot-loan/contracts/PredictDotLoan.sol#L889-L899
-```solidity
-    function _transferLoanAmountAndProtocolFee(
-        address from,
-        address to,
-        uint256 loanAmount
-    ) private returns (uint256 protocolFee) {
-        protocolFee = (loanAmount * protocolFeeBasisPoints) / 10_000;
-        LOAN_TOKEN.safeTransferFrom(from, to, loanAmount - protocolFee);
-        if (protocolFee > 0) {
-            LOAN_TOKEN.safeTransferFrom(from, protocolFeeRecipient, protocolFee);
-        }
-    }
-```
-
-The `refinace()`, `auction` and `acceptLoanOfferAndFillOrder` use the following function.
-https://github.com/sherlock-audit/2024-09-predict-fun/blob/main/predict-dot-loan/contracts/PredictDotLoan.sol#L889-L899
-```solidity
-    function _transferLoanAmountAndProtocolFeeWithoutDeductingFromLoanAmount(
-        address from,
-        address to,
-        uint256 loanAmount,
-        uint256 protocolFee
-    ) private {
-        LOAN_TOKEN.safeTransferFrom(from, to, loanAmount);
-        if (protocolFee > 0) {
-            LOAN_TOKEN.safeTransferFrom(from, protocolFeeRecipient, protocolFee);
-        }
-    }
-```
-The `protocolFee` represents the percentage of the loan amount that is actually disbursed to the borrower.
-```solidity
-    protocolFee = (exchangeOrder.takerAmount * protocolFeeBasisPoints) / 10_000;
-      [...]
-    protocolFee = (debt * protocolFeeBasisPoints) / 10_000;
-      [...]
-```
-
-In other words, the protocol employs two different formulas for calculating fees.
-
-### Internal pre-conditions
-
-protocolFeeBasisPoints = 200
-
-### External pre-conditions
-
-None
-
-### Attack Path
-
-Consider the following scenario:
-- Alice called `acceptOffer()` with `loanAmount` as 10000. 
-    protocolFee = 10000 * 200 / 10000 = 200.
-    So, the amount actually given to Alice is 10000 - 200 = 9800.
-- Bob called `acceptLoanOfferAndFillOrder()` with `exchangeOrder.takerAmount` as 9800.
-    protocolFee = 9800 * 200 / 10000 = 196.
-
-In the scenario described above, both Alice and Bob each receive 98,000 LOAN_TOKEN.
-However, Alice pays 5 LOAN_TOKEN more than Bob does.
-
-### Impact
-
-The fee calculation mechanism operates in two distinct ways.
-
-### PoC
-
-### Mitigation
-
-The fee calculation mechanism should be unified.
-
-
-
-## Discussion
-
-**sherlock-admin2**
-
-The protocol team fixed this issue in the following PRs/commits:
-https://github.com/PredictDotFun/predict-dot-loan/pull/50
-
-
-# Issue M-6: If Lender gets blacklisted for USDC it will DoS borrower from repaying, which will lock up the collateral CTF tokens. 
-
-Source: https://github.com/sherlock-audit/2024-09-predict-fun-judging/issues/214 
-
-The protocol has acknowledged this issue.
-
-## Found by 
-valuevalk
-## Summary
-USDC has blacklist functionality. If the lender gets blacklisted, the borrower cannot repay the debt and get his collateral back.
-
-## Vulnerability Detail
-
-**Flow:**
-- Borrower accepts loan offer and Lender transfers him the `LOAN_TOKEN`. `CTF_TOKEN` ( the collateral ) gets deposited into the `PredictDotLoan.sol` contract. Borrower believes his collateral is valuable, but needs more liquidity/capital.
-- Lender gets blacklisted for USDC.
-- Borrower wants to repay and get his valuable collateral back, however he can't because we use the "push-model" which is trying to transfer back the `LOAN_TOKEN` to the Lender in the same call.  The transaction fails. - [snippet](https://github.com/sherlock-audit/2024-09-predict-fun/blob/41e70f9eed3f00dd29aba4038544150f5b35dccb/predict-dot-loan/contracts/PredictDotLoan.sol#L470)
-```solidity
-    function repay(uint256 loanId) external nonReentrant {
-        Loan storage loan = loans[loanId];
-        _assertAuthorizedCaller(loan.borrower);
-        LoanStatus status = loan.status;
-        if (status != LoanStatus.Active) {
-            if (status != LoanStatus.Called) {
-                revert InvalidLoanStatus();
-            }
-        }
-        uint256 debt = _calculateDebt(loan.loanAmount, loan.interestRatePerSecond, _calculateLoanTimeElapsed(loan));
-        loan.status = LoanStatus.Repaid;
-
-@>>        LOAN_TOKEN.safeTransferFrom(msg.sender, loan.lender, debt);
-
-        CTF.safeTransferFrom(address(this), msg.sender, loan.positionId, loan.collateralAmount, "");
-        emit LoanRepaid(loanId, debt);
-    }
-```    
-- Borrower cannot regain his collateral and its locked in the `PredictDotLoan.sol` contract.
-
-## Impact
-Valuable collateral of the borrower is stuck in the `PredictDotLoan.sol` contract.
-
-## Tool used
-
-Manual Review
-
-## Recommendation
-Instead of using the push-model ( to directly push the funds that need to be withdrawn to the lender ), use the pull design pattern. This way the lender can withdraw the `LOAN_TOKEN` himself, without locking valuable ConditionalToken collateral which the borrower can't get back because of failing transfer due to blacklist.
-If the lender gets blacklisted and can't withdraw `LOAN_TOKEN` its his fault.
-
-
-# Issue M-7: Malicios user can block borrowers repay using blocklist in USDC 
-
-Source: https://github.com/sherlock-audit/2024-09-predict-fun-judging/issues/240 
-
-The protocol has acknowledged this issue.
-
-## Found by 
-Sickurity
-### Summary
-
-According to the Contest Readme, the protocol is allowed to be used in other networks. In these networks, USDC, which has a blacklist function, will serve as the Loan token.
-
-The repay function transfers LOAN_TOKEN from the borrower to the lender.
-
-Thus, a malicious actor (lender) can manipulate the call of the repay function from the borrower, preventing them from repaying the debt in this transaction, which leads to an [increase in their debt](https://github.com/sherlock-audit/2024-09-predict-fun/blob/main/predict-dot-loan/contracts/PredictDotLoan.sol#L772C5-L773C20). 
-```solidity
-function repay(uint256 loanId) external nonReentrant {
-        Loan storage loan = loans[loanId];
-
-        _assertAuthorizedCaller(loan.borrower);
-
-        LoanStatus status = loan.status;
-        if (status != LoanStatus.Active) {
-            if (status != LoanStatus.Called) {
-                revert InvalidLoanStatus();
-            }
-        }
-
-        uint256 debt = _calculateDebt(loan.loanAmount, loan.interestRatePerSecond, _calculateLoanTimeElapsed(loan));
-
-        loan.status = LoanStatus.Repaid;
-
-        LOAN_TOKEN.safeTransferFrom(msg.sender, loan.lender, debt);
-        CTF.safeTransferFrom(address(this), msg.sender, loan.positionId, loan.collateralAmount, "");
-
-        emit LoanRepaid(loanId, debt);
-    }
- ```
-
-### Root Cause
-
-The Root Cause lies in the fact that the repay function transfers funds directly to the lender's address, which could potentially be malicious. In combination with USDC's blacklist functionality, this creates opportunities for this attack.
-
-### Internal pre-conditions
-
-_No response_
-
-### External pre-conditions
-
-The protocol must be deployed on a network other than Blast and use USDC as the LOAN token.
-
-### Attack Path
-
-The attacker issues a loan, after adding his address to the USDC blocklist, the user is unable to repay his loan until the attacker is able to invoke a call on the loan. After that, the interest that the user will pay for his loan will be maximised.
-
-### Impact
-
-In networks other than Blast, lenders can intentionally prevent borrowers from repaying loans, either forcing them into default or increasing interest rates.
-
-An example of such an error, rated as high severity.
-
-[1](https://solodit.xyz/issues/h-4-lender-force-loan-become-default-sherlock-cooler-cooler-git_)
-
-However, since the main network for this protocol is Blast, and USDC will be used as the LOAN token in other networks, presumably, the severity is: medium.
-
-### PoC
-
-_No response_
-
-### Mitigation
-
-Use Solidity Withdrawal pattern
-
-# Issue M-8: hashProposal uses wrong typeshash when hashing the encoded Proposal struct data 
+# Issue M-5: hashProposal uses wrong typeshash when hashing the encoded Proposal struct data 
 
 Source: https://github.com/sherlock-audit/2024-09-predict-fun-judging/issues/266 
 
